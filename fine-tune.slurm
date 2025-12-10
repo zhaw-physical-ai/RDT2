@@ -134,7 +134,7 @@ echo "Detected $NUM_GPUS GPUs."
 
 # 2. Configuration Targets
 # Constraint: You can only fit 32 per GPU.
-PHYSICAL_BATCH_PER_GPU=32
+PHYSICAL_BATCH_PER_GPU=16
 # Goal: Match the stability of the original config (Batch=64).
 TARGET_GLOBAL_BATCH_SIZE=64
 BASE_LR=1e-5
@@ -176,6 +176,7 @@ echo "Starting Accelerate Launch..."
     --mixed_precision="bf16" \
     main.py \
     --attn_implementation="sdpa" \
+    --gradient_checkpointing \
     --tokenizer_name=$TOKENIZER_ID \
     --vae_name=$VAE_ID \
     --pretrained_model_name_or_path=$MODEL_ID \
