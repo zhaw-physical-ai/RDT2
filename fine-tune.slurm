@@ -32,7 +32,7 @@ export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
 export MAX_JOBS=8
 export WANDB_PROJECT="rdt2_finetune"
-export WANDB_ENTITY="sagerpascal"
+export WANDB_ENTITY="zhaw-physical-ai"
 export WANDB_WATCH="false"
 
 # --- 2. Safety & Cleanup ---
@@ -126,23 +126,62 @@ export VAE_ID="robotics-diffusion-transformer/RVQActionTokenizer"
 export MODEL_ID="robotics-diffusion-transformer/RDT2-VQ"
 
 if [ ! -d "$OUTPUT_DIR" ]; then mkdir -p "$OUTPUT_DIR"; fi
+
+# 1. Auto-detect Number of GPUs
 NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 [ -z "$NUM_GPUS" ] && NUM_GPUS=1
+echo "Detected $NUM_GPUS GPUs."
 
-echo "Starting Accelerate Launch on $NUM_GPUS GPUs..."
+# 2. Configuration Targets
+# Constraint: You can only fit 32 per GPU.
+PHYSICAL_BATCH_PER_GPU=32
+# Goal: Match the stability of the original config (Batch=64).
+TARGET_GLOBAL_BATCH_SIZE=64
+BASE_LR=1e-5
 
-# FIX: Removed space in '--attn_implementation'
+# 3. Calculate Gradient Accumulation & LR
+# Total physical throughput per step = 32 * Num_GPUs
+CURRENT_GLOBAL_BATCH=$((PHYSICAL_BATCH_PER_GPU * NUM_GPUS))
+
+# Calculate Grad Accumulation: Ensure we hit at least target 64
+if [ $CURRENT_GLOBAL_BATCH -lt $TARGET_GLOBAL_BATCH_SIZE ]; then
+    # e.g., 1 GPU: 32 < 64 -> Need 2 steps
+    GRAD_ACCUM_STEPS=$((TARGET_GLOBAL_BATCH_SIZE / CURRENT_GLOBAL_BATCH))
+else
+    # e.g., 2 GPUs: 64 >= 64 -> Need 1 step
+    GRAD_ACCUM_STEPS=1
+fi
+
+# Calculate Final Effective Batch Size
+EFFECTIVE_BATCH_SIZE=$((CURRENT_GLOBAL_BATCH * GRAD_ACCUM_STEPS))
+
+# Scale LR linearly: New_LR = Base_LR * (Effective_Batch / 64)
+# Python used for accurate floating point math
+LEARNING_RATE=$(python3 -c "print(f'{${BASE_LR} * (${EFFECTIVE_BATCH_SIZE} / 64.0)}')")
+
+echo "--- HYPERPARAMETER CONFIG ---"
+echo "Constraint (Per GPU): $PHYSICAL_BATCH_PER_GPU"
+echo "Target Global Batch:  $TARGET_GLOBAL_BATCH_SIZE"
+echo "Active GPUs:          $NUM_GPUS"
+echo "-----------------------------"
+echo "Gradient Accum Steps: $GRAD_ACCUM_STEPS"
+echo "Effective Batch Size: $EFFECTIVE_BATCH_SIZE"
+echo "Learning Rate:        $LEARNING_RATE"
+echo "-----------------------------"
+
+echo "Starting Accelerate Launch..."
+
 "$JOB_VENV/bin/python" -u -m accelerate.commands.launch \
     --num_processes=$NUM_GPUS \
     --mixed_precision="bf16" \
     main.py \
-    --deepspeed="scripts/zero1.json" \
     --attn_implementation="sdpa" \
     --tokenizer_name=$TOKENIZER_ID \
     --vae_name=$VAE_ID \
     --pretrained_model_name_or_path=$MODEL_ID \
     --output_dir=$OUTPUT_DIR \
-    --train_batch_size=64 \
+    --train_batch_size=$PHYSICAL_BATCH_PER_GPU \
+    --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
     --eval_batch_size=32 \
     --max_train_steps=10000 \
     --eval_strategy="no" \
@@ -150,12 +189,15 @@ echo "Starting Accelerate Launch on $NUM_GPUS GPUs..."
     --checkpoints_total_limit=20 \
     --checkpointing_step=1000 \
     --lr_scheduler="cosine" \
-    --learning_rate=1e-5 \
+    --learning_rate=$LEARNING_RATE \
     --dataloader_num_workers=16 \
-    --gradient_checkpointing \
     --log_level="info" \
     --report_to="wandb" \
     --lr_warmup_steps=500 \
     --dataset="$GENERATED_CONFIG" \
     --image_corruption \
     --use_default_collate_fn_for_eval
+
+# Old arguments we removed for ZHAW DGX:
+#    --gradient_checkpointing \
+#    --deepspeed="scripts/zero1.json" \
