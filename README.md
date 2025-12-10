@@ -218,7 +218,7 @@ processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
 model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
     "robotics-diffusion-transformer/RDT2-VQ"
     torch_dtype=torch.bfloat16,
-    attn_implementation="flash_attention_2",
+    attn_implementation="flash_attention_2", # or on ZHAW cluster use sdpa
     device_map=device
 ).eval()
 vae = MultiVQVAE.from_pretrained("robotics-diffusion-transformer/RVQActionTokenizer").eval()

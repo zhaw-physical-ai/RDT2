@@ -228,6 +228,8 @@ def parse_args(input_args=None):
         
     )
 
+    parser.add_argument("--attn_implementation", type=str,  default="flash_attention_2", help="The attention implementation to use.")
+
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 
     if input_args is not None:

@@ -55,7 +55,7 @@ def train(args):
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             args.pretrained_model_name_or_path,
             quantization_config=bnb_config if args.use_qlora else None,
-            attn_implementation="flash_attention_2",
+            attn_implementation=args.attn_implementation,
             torch_dtype=weight_dtype,
             device_map=args.local_rank,
         )
@@ -67,7 +67,7 @@ def train(args):
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             args.pretrained_model_name_or_path,
             torch_dtype=weight_dtype,
-            attn_implementation="flash_attention_2",
+            attn_implementation=args.attn_implementation,
             device_map=args.local_rank,
         )
 

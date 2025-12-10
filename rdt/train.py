@@ -131,7 +131,7 @@ def train(args, logger):
     vision_language_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         args.pretrained_vision_language_model_name_or_path,
         torch_dtype=weight_dtype,
-        attn_implementation="flash_attention_2",
+        attn_implementation=args.attn_implementation,
         device_map=accelerator.device,
     )
     vision_language_model.eval()

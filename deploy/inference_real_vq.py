@@ -236,6 +236,7 @@ def main(
             else:
                 if True or not hasattr(main, '_cached_model') or main._cached_model is None or main._cached_model_path != input:
                     print("Loading model from scratch...")
+                    raise warnings.Warning("We use flash attention 2. This could be problematic on ZHAW cluster (add option to switch to sdpa attention)")
                     main._cached_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                         input,
                         torch_dtype=torch.bfloat16,

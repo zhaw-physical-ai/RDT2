@@ -113,6 +113,8 @@ class RDTInferencer:
         return _model
 
     def get_vision_language_model(self, pretrained_vision_language_model_name_or_path):
+        raise warnings.Warning(
+            "We use flash attention 2. This could be problematic on ZHAW cluster (add option to switch to sdpa attention)")
         vision_language_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             pretrained_vision_language_model_name_or_path,
             torch_dtype=self.dtype,
