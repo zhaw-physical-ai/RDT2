@@ -139,20 +139,21 @@ NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 [ -z "$NUM_GPUS" ] && NUM_GPUS=1
 echo "Detected $NUM_GPUS GPUs."
 
-# 2. Configuration Targets
-PHYSICAL_BATCH_PER_GPU=16
 
 # 3. Determine Settings based on Mode
 if [ "$TRAIN_MODE" == "lora" ]; then
+    PHYSICAL_BATCH_PER_GPU=64
     TARGET_GLOBAL_BATCH_SIZE=96
     BASE_LR=1e-4
     BASE_BATCH_SCALING=96 # Normalize against the template's target
 elif [ "$TRAIN_MODE" == "rdt" ]; then
+    PHYSICAL_BATCH_PER_GPU=64
     TARGET_GLOBAL_BATCH_SIZE=64
     BASE_LR=1e-4
     BASE_BATCH_SCALING=64
 else
     # Full Fine-tune (Default)
+    PHYSICAL_BATCH_PER_GPU=16
     TARGET_GLOBAL_BATCH_SIZE=64
     BASE_LR=1e-5
     BASE_BATCH_SCALING=64
