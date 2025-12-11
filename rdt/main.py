@@ -292,6 +292,9 @@ def parse_args(input_args=None):
         ),
     )
 
+    parser.add_argument("--attn_implementation", type=str, default="flash_attention_2",
+                        help="The attention implementation to use.")
+
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:

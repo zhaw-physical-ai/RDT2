@@ -189,6 +189,8 @@ echo "Starting Accelerate Launch..."
 
 if [ "$TRAIN_MODE" == "rdt" ]; then
     # === RDT TRAINING MODE ===
+    export PYTHONPATH="$WORK_DIR:$PYTHONPATH"
+
     # Assumes configs/rdt/post_train.yaml exists in your repo
     RDT_CONFIG_PATH="./configs/rdt/post_train.yaml"
 
