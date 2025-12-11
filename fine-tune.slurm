@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --time=24:00:00
-#SBATCH --job-name=rdt2_finetune
+#SBATCH --job-name=rdt2_train
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
@@ -14,14 +14,24 @@
 # Exit immediately if any command fails
 set -e
 
+# --- USER CONFIGURATION ---
+# Options: "full", "lora", "rdt"
+TRAIN_MODE="full"
+
 # --- 1. Environment & Path Setup ---
 export BASE_SCRATCH="/scratch"
 export WORK_DIR="$SLURM_SUBMIT_DIR"
 export PERSISTENT_DATA_DIR="$WORK_DIR/data_shards"
 export SCRATCH_DATA_ROOT="$BASE_SCRATCH/rdt2_data"
 export JOB_VENV="$BASE_SCRATCH/venvs/rdt2_node_venv"
-export OUTPUT_DIR="$BASE_SCRATCH/outputs/vqvla-sft-${SLURM_JOB_ID}"
-export FINAL_OUTPUT_DIR="$WORK_DIR/results/${SLURM_JOB_ID}"
+
+# Compiler flags (Required for RDT Custom Kernels)
+export CFLAGS="-I/usr/include"
+export LDFLAGS="-L/usr/lib/x86_64-linux-gnu"
+
+# Dynamic Output Directory based on mode
+export OUTPUT_DIR="$BASE_SCRATCH/outputs/rdt2-${TRAIN_MODE}-${SLURM_JOB_ID}"
+export FINAL_OUTPUT_DIR="$WORK_DIR/results/${TRAIN_MODE}/${SLURM_JOB_ID}"
 export HF_HOME="$BASE_SCRATCH/hf_cache"
 export UV_CACHE_DIR="$BASE_SCRATCH/uv_cache_shared"
 export TORCH_HOME="$BASE_SCRATCH/torch_cache"
@@ -34,6 +44,9 @@ export MAX_JOBS=8
 export WANDB_PROJECT="rdt2_finetune"
 export WANDB_ENTITY="zhaw-physical-ai"
 export WANDB_WATCH="false"
+
+# Dynamic WandB Name
+export WANDB_NAME="${TRAIN_MODE}_${SLURM_JOB_ID}"
 
 # --- 2. Safety & Cleanup ---
 cleanup_and_sync() {
@@ -56,7 +69,6 @@ module load uv/0.6.12
 module load cuda/12.4
 
 # --- 4. Environment Creation (Optimized) ---
-# OPTIMIZATION: Only create venv if it doesn't exist. Saves 3-5 mins.
 if [ ! -d "$JOB_VENV" ]; then
     echo "--- CREATING NEW VENV ---"
     uv venv "$JOB_VENV" --python 3.10
@@ -96,13 +108,9 @@ mkdir -p "$SCRATCH_DATA_ROOT"
 rsync -a --info=progress2 "$PERSISTENT_DATA_DIR/" "$SCRATCH_DATA_ROOT/"
 
 # 5.3 Manual Instruction File Creation
-# REMOVED: 50 lines of Python code.
-# ADDED: Simple file creation. (This assumes the key is always 'language_instruction')
 INSTRUCTION_FILE="$SCRATCH_DATA_ROOT/instruction.json"
 if [ ! -f "$INSTRUCTION_FILE" ]; then
     echo "Creating instruction.json..."
-    # Note: 'language_instruction' is the standard key for this dataset.
-    # If your dataset changes, verify this key.
     echo '{"language_instruction": "Pick up the object and place it correctly."}' > "$INSTRUCTION_FILE"
 fi
 
@@ -119,8 +127,7 @@ kwargs:
   normalizer_path: ${SCRATCH_DATA_ROOT}/normalizer.pt
 EOF
 
-# --- 6. Execution ---
-TASK="bimanual-ur5e-example"
+# --- 6. Execution Setup ---
 export TOKENIZER_ID="Qwen/Qwen2.5-VL-7B-Instruct"
 export VAE_ID="robotics-diffusion-transformer/RVQActionTokenizer"
 export MODEL_ID="robotics-diffusion-transformer/RDT2-VQ"
@@ -133,72 +140,139 @@ NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 echo "Detected $NUM_GPUS GPUs."
 
 # 2. Configuration Targets
-# Constraint: You can only fit 32 per GPU.
 PHYSICAL_BATCH_PER_GPU=16
-# Goal: Match the stability of the original config (Batch=64).
-TARGET_GLOBAL_BATCH_SIZE=64
-BASE_LR=1e-5
 
-# 3. Calculate Gradient Accumulation & LR
-# Total physical throughput per step = 32 * Num_GPUs
+# 3. Determine Settings based on Mode
+if [ "$TRAIN_MODE" == "lora" ]; then
+    TARGET_GLOBAL_BATCH_SIZE=96
+    BASE_LR=1e-4
+    BASE_BATCH_SCALING=96 # Normalize against the template's target
+elif [ "$TRAIN_MODE" == "rdt" ]; then
+    TARGET_GLOBAL_BATCH_SIZE=64
+    BASE_LR=1e-4
+    BASE_BATCH_SCALING=64
+else
+    # Full Fine-tune (Default)
+    TARGET_GLOBAL_BATCH_SIZE=64
+    BASE_LR=1e-5
+    BASE_BATCH_SCALING=64
+fi
+
+# 4. Calculate Gradient Accumulation
 CURRENT_GLOBAL_BATCH=$((PHYSICAL_BATCH_PER_GPU * NUM_GPUS))
 
-# Calculate Grad Accumulation: Ensure we hit at least target 64
 if [ $CURRENT_GLOBAL_BATCH -lt $TARGET_GLOBAL_BATCH_SIZE ]; then
-    # e.g., 1 GPU: 32 < 64 -> Need 2 steps
     GRAD_ACCUM_STEPS=$((TARGET_GLOBAL_BATCH_SIZE / CURRENT_GLOBAL_BATCH))
 else
-    # e.g., 2 GPUs: 64 >= 64 -> Need 1 step
     GRAD_ACCUM_STEPS=1
 fi
 
-# Calculate Final Effective Batch Size
 EFFECTIVE_BATCH_SIZE=$((CURRENT_GLOBAL_BATCH * GRAD_ACCUM_STEPS))
 
-# Scale LR linearly: New_LR = Base_LR * (Effective_Batch / 64)
-# Python used for accurate floating point math
-LEARNING_RATE=$(python3 -c "print(f'{${BASE_LR} * (${EFFECTIVE_BATCH_SIZE} / 64.0)}')")
+# 5. Scale LR (Only for 'full' mode usually, but applying logic to all for consistency)
+# For LoRA/RDT we respect the explicit 1e-4 base more, but scaling is still good practice.
+LEARNING_RATE=$(python3 -c "print(f'{${BASE_LR} * (${EFFECTIVE_BATCH_SIZE} / ${BASE_BATCH_SCALING}.0)}')")
 
 echo "--- HYPERPARAMETER CONFIG ---"
+echo "Mode:                 $TRAIN_MODE"
 echo "Constraint (Per GPU): $PHYSICAL_BATCH_PER_GPU"
 echo "Target Global Batch:  $TARGET_GLOBAL_BATCH_SIZE"
-echo "Active GPUs:          $NUM_GPUS"
-echo "-----------------------------"
 echo "Gradient Accum Steps: $GRAD_ACCUM_STEPS"
 echo "Effective Batch Size: $EFFECTIVE_BATCH_SIZE"
 echo "Learning Rate:        $LEARNING_RATE"
+echo "WandB Name:           $WANDB_NAME"
 echo "-----------------------------"
 
 echo "Starting Accelerate Launch..."
 
-"$JOB_VENV/bin/python" -u -m accelerate.commands.launch \
-    --num_processes=$NUM_GPUS \
-    --mixed_precision="bf16" \
-    main.py \
-    --attn_implementation="sdpa" \
-    --gradient_checkpointing \
-    --tokenizer_name=$TOKENIZER_ID \
-    --vae_name=$VAE_ID \
-    --pretrained_model_name_or_path=$MODEL_ID \
-    --output_dir=$OUTPUT_DIR \
-    --train_batch_size=$PHYSICAL_BATCH_PER_GPU \
-    --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
-    --eval_batch_size=32 \
-    --max_train_steps=10000 \
-    --eval_strategy="no" \
-    --logging_steps=25 \
-    --checkpoints_total_limit=20 \
-    --checkpointing_step=1000 \
-    --lr_scheduler="cosine" \
-    --learning_rate=$LEARNING_RATE \
-    --dataloader_num_workers=16 \
-    --log_level="info" \
-    --report_to="wandb" \
-    --lr_warmup_steps=500 \
-    --dataset="$GENERATED_CONFIG" \
-    --image_corruption \
-    --use_default_collate_fn_for_eval
+# --- 7. Execution Logic ---
+
+if [ "$TRAIN_MODE" == "rdt" ]; then
+    # === RDT TRAINING MODE ===
+    # Assumes configs/rdt/post_train.yaml exists in your repo
+    RDT_CONFIG_PATH="./configs/rdt/post_train.yaml"
+
+    "$JOB_VENV/bin/python" -u -m accelerate.commands.launch \
+        --num_processes=$NUM_GPUS \
+        --mixed_precision="bf16" \
+        rdt/main.py \
+        --config_path="$RDT_CONFIG_PATH" \
+        --pretrained_vision_language_model_name_or_path=$MODEL_ID \
+        --output_dir=$OUTPUT_DIR \
+        --webdataset_config="$GENERATED_CONFIG" \
+        --train_batch_size=$PHYSICAL_BATCH_PER_GPU \
+        --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
+        --sample_batch_size=32 \
+        --max_train_steps=1000000 \
+        --checkpointing_period=5000 \
+        --sample_period=1000 \
+        --checkpoints_total_limit=40 \
+        --lr_scheduler="constant" \
+        --learning_rate=$LEARNING_RATE \
+        --dataloader_num_workers=16 \
+        --image_aug \
+        --report_to="wandb"
+
+elif [ "$TRAIN_MODE" == "lora" ]; then
+    "$JOB_VENV/bin/python" -u -m accelerate.commands.launch \
+        --num_processes=$NUM_GPUS \
+        --mixed_precision="bf16" \
+        main.py \
+        --attn_implementation="sdpa" \
+        --gradient_checkpointing \
+        --tokenizer_name=$TOKENIZER_ID \
+        --vae_name=$VAE_ID \
+        --pretrained_model_name_or_path=$MODEL_ID \
+        --output_dir=$OUTPUT_DIR \
+        --train_batch_size=$PHYSICAL_BATCH_PER_GPU \
+        --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
+        --eval_batch_size=32 \
+        --max_train_steps=10000 \
+        --eval_strategy="no" \
+        --logging_steps=25 \
+        --checkpoints_total_limit=20 \
+        --checkpointing_step=1000 \
+        --lr_scheduler="cosine" \
+        --learning_rate=$LEARNING_RATE \
+        --dataloader_num_workers=16 \
+        --log_level="info" \
+        --report_to="wandb" \
+        --lr_warmup_steps=500 \
+        --dataset="$GENERATED_CONFIG" \
+        --image_corruption \
+        --use_lora \
+        --use_default_collate_fn_for_eval
+
+else
+    # === FULL FINE-TUNING MODE (Default) ===
+    "$JOB_VENV/bin/python" -u -m accelerate.commands.launch \
+        --num_processes=$NUM_GPUS \
+        --mixed_precision="bf16" \
+        main.py \
+        --attn_implementation="sdpa" \
+        --gradient_checkpointing \
+        --tokenizer_name=$TOKENIZER_ID \
+        --vae_name=$VAE_ID \
+        --pretrained_model_name_or_path=$MODEL_ID \
+        --output_dir=$OUTPUT_DIR \
+        --train_batch_size=$PHYSICAL_BATCH_PER_GPU \
+        --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
+        --eval_batch_size=32 \
+        --max_train_steps=10000 \
+        --eval_strategy="no" \
+        --logging_steps=25 \
+        --checkpoints_total_limit=20 \
+        --checkpointing_step=1000 \
+        --lr_scheduler="cosine" \
+        --learning_rate=$LEARNING_RATE \
+        --dataloader_num_workers=16 \
+        --log_level="info" \
+        --report_to="wandb" \
+        --lr_warmup_steps=500 \
+        --dataset="$GENERATED_CONFIG" \
+        --image_corruption \
+        --use_default_collate_fn_for_eval
+fi
 
 # Old arguments we removed for ZHAW DGX:
-#    --gradient_checkpointing \
 #    --deepspeed="scripts/zero1.json" \
