@@ -198,6 +198,7 @@ if [ "$TRAIN_MODE" == "rdt" ]; then
         --num_processes=$NUM_GPUS \
         --mixed_precision="bf16" \
         rdt/main.py \
+        --attn_implementation="sdpa" \
         --config_path="$RDT_CONFIG_PATH" \
         --pretrained_vision_language_model_name_or_path=$MODEL_ID \
         --output_dir=$OUTPUT_DIR \

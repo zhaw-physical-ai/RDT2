@@ -132,7 +132,9 @@ def train(args, logger):
         args.pretrained_vision_language_model_name_or_path,
         torch_dtype=weight_dtype,
         attn_implementation=args.attn_implementation,
-        device_map=accelerator.device,
+        # device_map=accelerator.device,
+        # TODO: removed this for accelerate compatability
+        device_map=None,
     )
     vision_language_model.eval()
     # tokenizer = processor.tokenizer

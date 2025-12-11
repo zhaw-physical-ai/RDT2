@@ -119,7 +119,7 @@ class RDTInferencer:
             pretrained_vision_language_model_name_or_path,
             torch_dtype=self.dtype,
             attn_implementation="flash_attention_2",
-            device_map=self.device,
+            device_map=self.device
         )
         processor = AutoProcessor.from_pretrained(
             "Qwen/Qwen2.5-VL-7B-Instruct", padding_side="left", use_fast=True)

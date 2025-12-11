@@ -57,7 +57,9 @@ def train(args):
             quantization_config=bnb_config if args.use_qlora else None,
             attn_implementation=args.attn_implementation,
             torch_dtype=weight_dtype,
-            device_map=args.local_rank,
+            # device_map=args.local_rank,
+            # TODO: removed this for accelerate compatability
+            device_map=None,
         )
         model.add_adapter(lora_config)
         model.enable_adapters()
@@ -68,7 +70,9 @@ def train(args):
             args.pretrained_model_name_or_path,
             torch_dtype=weight_dtype,
             attn_implementation=args.attn_implementation,
-            device_map=args.local_rank,
+            # device_map=args.local_rank,
+            # TODO: removed this for accelerate compatability
+            device_map=None,
         )
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
