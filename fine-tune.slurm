@@ -106,6 +106,7 @@ fi
 # 5.2 Fast Copy to Scratch
 mkdir -p "$SCRATCH_DATA_ROOT"
 rsync -a --info=progress2 "$PERSISTENT_DATA_DIR/" "$SCRATCH_DATA_ROOT/"
+rsync -a --info=progress2 "$WORK_DIR/normalizer/umi_normalizer_wo_downsample_indentity_rot.pt" "${SCRATCH_DATA_ROOT}/umi_normalizer_wo_downsample_indentity_rot.pt"
 
 # 5.3 Manual Instruction File Creation
 INSTRUCTION_FILE="$SCRATCH_DATA_ROOT/instruction.json"
@@ -124,7 +125,7 @@ type: single
 shards_dir: ${REAL_SHARDS_DIR}
 kwargs:
   instruction_path: ${INSTRUCTION_FILE}
-  normalizer_path: ${SCRATCH_DATA_ROOT}/normalizer.pt
+  normalizer_path: ${SCRATCH_DATA_ROOT}/umi_normalizer_wo_downsample_indentity_rot.pt
 EOF
 
 # --- 6. Execution Setup ---
