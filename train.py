@@ -250,6 +250,8 @@ def train(args):
         compute_metrics=compute_metrics,
         num_eval_batches=args.num_eval_batches,
         use_default_collate_fn_for_eval=args.use_default_collate_fn_for_eval,
+        processor=processor,
+        vae=vae,
     )
 
     if args.resume_from_checkpoint == "latest":

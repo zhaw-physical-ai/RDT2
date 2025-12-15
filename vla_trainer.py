@@ -19,13 +19,18 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 
 import time
 from typing import TYPE_CHECKING, List, Optional, Union
+import io
+import os
 
 # isort: on
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from PIL import Image
 from packaging import version
 from torch.utils.data import DataLoader, Dataset
+import wandb
 
 from transformers import __version__
 from transformers.integrations.deepspeed import deepspeed_init
@@ -87,24 +92,31 @@ if TYPE_CHECKING:
 class VLATrainer(Trainer):
 
     def __init__(
-        self,
-        num_eval_datasets: int = 2, 
-        num_eval_batches: int = 4,
-        use_default_collate_fn_for_eval: bool = False,
-        *args, 
-        **kwargs
+            self,
+            num_eval_datasets: int = 2,
+            num_eval_batches: int = 4,
+            use_default_collate_fn_for_eval: bool = False,
+            processor=None,
+            vae=None,
+            *args,
+            **kwargs
     ):
         """Initializes VLATrainer.
 
         Args:
             num_eval_datasets (int, optional): Number of evaluation datasets to use. Defaults to 3.
             num_eval_batches (int, optional): Number of batches to evaluate for each dataset. Defaults to 10.
+            processor: The HuggingFace processor/tokenizer.
+            vae: The VQ-VAE model used for action encoding/decoding.
         """
         super().__init__(*args, **kwargs)
-        
+
         self.num_eval_datasets = num_eval_datasets
         self.num_eval_batches = num_eval_batches
         self.use_default_collate_fn_for_eval = use_default_collate_fn_for_eval
+
+        self.processor = processor
+        self.vae = vae
 
         # initialize the index of the evaluation dataset
         # we only evaluate `num_eval_datasets` datasets in a round-robin manner
@@ -145,7 +157,7 @@ class VLATrainer(Trainer):
         )
 
         collate_fn = (
-            None if self.use_default_collate_fn_for_eval 
+            None if self.use_default_collate_fn_for_eval
             else lambda examples: examples
         )
         # NOTE: we use customized collate_fn for evaluation
@@ -173,6 +185,130 @@ class VLATrainer(Trainer):
                 self._eval_dataloaders = {dataloader_key: eval_dataloader}
 
         return self.accelerator.prepare(eval_dataloader)
+
+    def log_wandb_visualizations(self, model, dataloader, prefix):
+        """
+        Generates predictions for a small batch, creates plots comparing GT vs Pred actions,
+        and logs them to WandB.
+        """
+        # Only log on main process and if wandb is enabled
+        if not self.is_world_process_zero():
+            return
+
+        if "wandb" not in self.args.report_to or wandb.run is None:
+            return
+
+        # Simple check to see if we have what we need
+        if self.processor is None or self.vae is None:
+            logger.warning("Processor or VAE not provided to VLATrainer. Skipping visualization logging.")
+            return
+
+        model.eval()
+
+        # Grab one batch from the dataloader
+        try:
+            inputs = next(iter(dataloader))
+        except StopIteration:
+            return
+
+        inputs = self._prepare_inputs(inputs)
+
+        # Limit visualization to first 4 examples
+        batch_size = inputs['input_ids'].shape[0]
+        limit = min(4, batch_size)
+
+        # 1. Generate Predictions (Greedy for deterministic eval)
+        # Estimate max tokens based on VAE structure if available, else default
+        max_new_tokens = 100
+        if hasattr(self.vae, 'pos_id_len') and hasattr(self.vae, 'rot_id_len') and hasattr(self.vae, 'grip_id_len'):
+            max_new_tokens = self.vae.pos_id_len + self.vae.rot_id_len + self.vae.grip_id_len + 10
+
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False
+            )
+
+        # Create WandB Table
+        columns = ["image", "instruction", "action_plot (GT vs Pred)"]
+        table = wandb.Table(columns=columns)
+
+        vocab_size = self.processor.tokenizer.vocab_size
+
+        for i in range(limit):
+            # --- Image ---
+            try:
+                # Assuming pixel_values in inputs, shape (B, ...).
+                # Qwen/VL usually has (B, C, H, W) or similar.
+                if 'pixel_values' in inputs:
+                    img_tensor = inputs['pixel_values'][i]
+                    # If 3D (C, H, W) -> (H, W, C)
+                    if img_tensor.dim() == 3:
+                        img_tensor = img_tensor.permute(1, 2, 0)
+
+                    img_numpy = img_tensor.cpu().float().numpy()
+                    # Simple min-max normalize for display
+                    if img_numpy.max() > img_numpy.min():
+                        img_numpy = (img_numpy - img_numpy.min()) / (img_numpy.max() - img_numpy.min())
+
+                    # Convert to PIL for WandB
+                    image_display = wandb.Image(img_numpy)
+                else:
+                    image_display = wandb.Image(np.zeros((64, 64, 3)))  # Placeholder
+            except Exception as e:
+                image_display = str(e)
+
+            # --- Instruction ---
+            try:
+                # Decode input text (instruction)
+                full_text = self.processor.decode(inputs['input_ids'][i], skip_special_tokens=True)
+                # Heuristic split to separate prompt from response, adjust based on template
+                instruction = full_text.split("assistant")[0][-200:]  # Take last 200 chars of prompt
+            except:
+                instruction = "Text Error"
+
+            # --- Action Plotting ---
+            try:
+                # 1. Extract GT Action Indices
+                gt_token_ids = inputs['labels'][i]
+                gt_token_ids = gt_token_ids[gt_token_ids != -100]  # Remove padding
+
+                # Reverse mapping: token_id = vocab_size - (action_id + 1)
+                # action_id = vocab_size - token_id - 1
+                gt_indices = vocab_size - gt_token_ids.cpu().numpy() - 1
+
+                # 2. Extract Predicted Action Indices
+                # We generated 'max_new_tokens'. We assume the last N tokens are the action.
+                # Or we can scan for the start of the action tokens.
+                # For simplicity in visualization, we take the last len(gt) tokens or similar.
+                pred_token_ids = generated_ids[i]
+                # Slice the newly generated part (approximate logic)
+                pred_token_ids = pred_token_ids[-len(gt_indices):]
+                pred_indices = vocab_size - pred_token_ids.cpu().numpy() - 1
+
+                # 3. Plot
+                plt.figure(figsize=(10, 4))
+                plt.plot(gt_indices, label='Ground Truth (VAE Indices)', marker='o', alpha=0.6)
+                plt.plot(pred_indices, label='Prediction (VAE Indices)', marker='x', alpha=0.6, linestyle='--')
+                plt.title("Action Sequence Comparison")
+                plt.xlabel("Step")
+                plt.ylabel("VAE Codebook Index")
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png')
+                plt.close()
+                buf.seek(0)
+                plot_img = wandb.Image(Image.open(buf))
+            except Exception as e:
+                plot_img = f"Plotting Error: {e}"
+
+            table.add_data(image_display, instruction, plot_img)
+
+        # Log to wandb
+        wandb.log({f"{prefix}/visualizations": table})
 
     def evaluation_loop(
         self,
@@ -325,6 +461,11 @@ class VLATrainer(Trainer):
             if not key.startswith(f"{metric_key_prefix}_"):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
+        try:
+            self.log_wandb_visualizations(model, dataloader, metric_key_prefix)
+        except Exception as e:
+            logger.warning(f"Failed to log visualizations to WandB: {e}")
+
         return EvalLoopOutput(predictions=None, label_ids=None, metrics=metrics, num_samples=num_samples)
 
     def evaluate(
@@ -375,7 +516,7 @@ class VLATrainer(Trainer):
         override = eval_dataset is not None
         eval_dataset = eval_dataset if override else self.eval_dataset
         if (
-            isinstance(eval_dataset, dict) and 
+            isinstance(eval_dataset, dict) and
             len(eval_dataset) > self.num_eval_datasets
         ):
             # use round-robin strategy to select `num_eval_datasets` evaluation datasets
@@ -386,7 +527,7 @@ class VLATrainer(Trainer):
                 ]
                 for i in range(self.num_eval_datasets)
             ]
-            
+
             # select designated evaluation datasets
             eval_dataset = {
                 eval_dataset_name: eval_dataset[eval_dataset_name]
@@ -394,7 +535,7 @@ class VLATrainer(Trainer):
             }
             # maintain the index of the evaluation dataset
             self.eval_dataset_index = (
-                (self.eval_dataset_index + self.num_eval_datasets) 
+                (self.eval_dataset_index + self.num_eval_datasets)
                     % total_eval_datasets
             )
         
