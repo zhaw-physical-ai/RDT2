@@ -17,6 +17,7 @@ set -e
 # --- USER CONFIGURATION ---
 # Options: "full", "lora", "rdt"
 TRAIN_MODE="full"
+LOG_PLOTS="true"  # Set to "false" to disable heavy plotting
 
 # --- 1. Environment & Path Setup ---
 export BASE_SCRATCH="/scratch"
@@ -25,11 +26,14 @@ export PERSISTENT_DATA_DIR="$WORK_DIR/data_shards"
 export SCRATCH_DATA_ROOT="$BASE_SCRATCH/rdt2_data"
 export JOB_VENV="$BASE_SCRATCH/venvs/rdt2_node_venv"
 
-# Compiler flags (Required for RDT Custom Kernels)
+# Export for Python
+export WANDB_ENABLE_PLOTS="$LOG_PLOTS"
+
+# Compiler flags
 export CFLAGS="-I/usr/include"
 export LDFLAGS="-L/usr/lib/x86_64-linux-gnu"
 
-# Dynamic Output Directory based on mode
+# Dynamic Output Directory
 export OUTPUT_DIR="$BASE_SCRATCH/outputs/rdt2-${TRAIN_MODE}-${SLURM_JOB_ID}"
 export FINAL_OUTPUT_DIR="$WORK_DIR/results/${TRAIN_MODE}/${SLURM_JOB_ID}"
 export HF_HOME="$BASE_SCRATCH/hf_cache"
@@ -44,8 +48,6 @@ export MAX_JOBS=8
 export WANDB_PROJECT="rdt2_finetune"
 export WANDB_ENTITY="zhaw-physical-ai"
 export WANDB_WATCH="false"
-
-# Dynamic WandB Name
 export WANDB_NAME="${TRAIN_MODE}_${SLURM_JOB_ID}"
 
 # --- 2. Safety & Cleanup ---
@@ -68,7 +70,7 @@ module load python/3.10
 module load uv/0.6.12
 module load cuda/12.4
 
-# --- 4. Environment Creation (Optimized) ---
+# --- 4. Environment Creation ---
 if [ ! -d "$JOB_VENV" ]; then
     echo "--- CREATING NEW VENV ---"
     uv venv "$JOB_VENV" --python 3.10
@@ -93,29 +95,42 @@ echo "Skipping ur5e.txt (Not needed for training)"
 # --- 5. DATA MANAGEMENT ---
 echo "--- DATA PREPARATION ---"
 
-# 5.1 Download (Only if missing)
+# 5.1 Check for Required Normalizer Source
+NORMALIZER_SRC="$WORK_DIR/normalizer/umi_normalizer_wo_downsample_indentity_rot.pt"
+
+if [ ! -f "$NORMALIZER_SRC" ]; then
+    echo "CRITICAL ERROR: Normalizer file missing at $NORMALIZER_SRC"
+    exit 1
+fi
+
+# 5.2 Download Data (Only if missing)
 if [ ! -d "$PERSISTENT_DATA_DIR" ]; then
     mkdir -p "$PERSISTENT_DATA_DIR"
     export HF_HUB_ENABLE_HF_TRANSFER=1
     "$JOB_VENV/bin/huggingface-cli" download robotics-diffusion-transformer/BimanualUR5eExample \
         --repo-type dataset --local-dir "$PERSISTENT_DATA_DIR" --local-dir-use-symlinks False
-
-    wget -nc -O "$PERSISTENT_DATA_DIR/normalizer.pt" "http://ml.cs.tsinghua.edu.cn/~lingxuan/rdt2/umi_normalizer_wo_downsample_indentity_rot.pt"
 fi
 
-# 5.2 Fast Copy to Scratch
+# 5.3 Fast Copy to Scratch (Syncs shards AND instruction.json if present)
 mkdir -p "$SCRATCH_DATA_ROOT"
+echo "Syncing data shards to scratch..."
 rsync -a --info=progress2 "$PERSISTENT_DATA_DIR/" "$SCRATCH_DATA_ROOT/"
-rsync -a --info=progress2 "$WORK_DIR/normalizer/umi_normalizer_wo_downsample_indentity_rot.pt" "${SCRATCH_DATA_ROOT}/umi_normalizer_wo_downsample_indentity_rot.pt"
 
-# 5.3 Manual Instruction File Creation
-INSTRUCTION_FILE="$SCRATCH_DATA_ROOT/instruction.json"
-if [ ! -f "$INSTRUCTION_FILE" ]; then
-    echo "Creating instruction.json..."
-    echo '{"language_instruction": "Pick up the object and place it correctly."}' > "$INSTRUCTION_FILE"
+# Copy Normalizer explicitly
+rsync -a "$NORMALIZER_SRC" "${SCRATCH_DATA_ROOT}/umi_normalizer_wo_downsample_indentity_rot.pt"
+
+# 5.4 Locate Instruction File in Scratch (Handles singular/plural naming)
+if [ -f "$SCRATCH_DATA_ROOT/instruction.json" ]; then
+    FINAL_INSTRUCTION_PATH="$SCRATCH_DATA_ROOT/instruction.json"
+elif [ -f "$SCRATCH_DATA_ROOT/instructions.json" ]; then
+    FINAL_INSTRUCTION_PATH="$SCRATCH_DATA_ROOT/instructions.json"
+else
+    echo "CRITICAL ERROR: No instruction.json or instructions.json found in $SCRATCH_DATA_ROOT"
+    ls -l "$SCRATCH_DATA_ROOT"
+    exit 1
 fi
 
-# 5.4 Generate Config
+# 5.5 Generate Config
 REAL_SHARDS_DIR=$(find "$SCRATCH_DATA_ROOT" -name "*.tar" -print -quit | xargs dirname)
 GENERATED_CONFIG="$SCRATCH_DATA_ROOT/slurm_config.yaml"
 
@@ -124,9 +139,50 @@ name: bimanual/ur_example
 type: single
 shards_dir: ${REAL_SHARDS_DIR}
 kwargs:
-  instruction_path: ${INSTRUCTION_FILE}
+  instruction_path: ${FINAL_INSTRUCTION_PATH}
   normalizer_path: ${SCRATCH_DATA_ROOT}/umi_normalizer_wo_downsample_indentity_rot.pt
 EOF
+
+# --- 5.6 FINAL FILE VERIFICATION ---
+echo "--------------------------------------------------------"
+echo "VERIFYING SCRATCH FILES BEFORE TRAINING..."
+MISSING_FILES=0
+
+if [ ! -f "${SCRATCH_DATA_ROOT}/umi_normalizer_wo_downsample_indentity_rot.pt" ]; then
+    echo "[FAIL] Normalizer missing in scratch."
+    MISSING_FILES=1
+else
+    echo "[OK] Normalizer found."
+fi
+
+if [ ! -f "$FINAL_INSTRUCTION_PATH" ]; then
+    echo "[FAIL] Instruction file missing in scratch."
+    MISSING_FILES=1
+else
+    echo "[OK] Instruction file found: $FINAL_INSTRUCTION_PATH"
+fi
+
+if [ -z "$REAL_SHARDS_DIR" ]; then
+    echo "[FAIL] No .tar shards found."
+    MISSING_FILES=1
+else
+    SHARD_COUNT=$(find "$REAL_SHARDS_DIR" -name "*.tar" | wc -l)
+    echo "[OK] Found $SHARD_COUNT shards in $REAL_SHARDS_DIR"
+fi
+
+if [ ! -f "$GENERATED_CONFIG" ]; then
+    echo "[FAIL] Config generation failed."
+    MISSING_FILES=1
+else
+    echo "[OK] Config generated at $GENERATED_CONFIG"
+fi
+
+if [ $MISSING_FILES -ne 0 ]; then
+    echo "CRITICAL: Data verification failed. Aborting."
+    exit 1
+fi
+echo "--------------------------------------------------------"
+
 
 # --- 6. Execution Setup ---
 export TOKENIZER_ID="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -140,13 +196,12 @@ NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 [ -z "$NUM_GPUS" ] && NUM_GPUS=1
 echo "Detected $NUM_GPUS GPUs."
 
-
 # 3. Determine Settings based on Mode
 if [ "$TRAIN_MODE" == "lora" ]; then
     PHYSICAL_BATCH_PER_GPU=64
     TARGET_GLOBAL_BATCH_SIZE=96
     BASE_LR=1e-4
-    BASE_BATCH_SCALING=96 # Normalize against the template's target
+    BASE_BATCH_SCALING=96
 elif [ "$TRAIN_MODE" == "rdt" ]; then
     PHYSICAL_BATCH_PER_GPU=64
     TARGET_GLOBAL_BATCH_SIZE=64
@@ -182,7 +237,6 @@ echo "Target Global Batch:  $TARGET_GLOBAL_BATCH_SIZE"
 echo "Gradient Accum Steps: $GRAD_ACCUM_STEPS"
 echo "Effective Batch Size: $EFFECTIVE_BATCH_SIZE"
 echo "Learning Rate:        $LEARNING_RATE"
-echo "WandB Name:           $WANDB_NAME"
 echo "-----------------------------"
 
 echo "Starting Accelerate Launch..."
@@ -233,7 +287,8 @@ elif [ "$TRAIN_MODE" == "lora" ]; then
         --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
         --eval_batch_size=32 \
         --max_train_steps=10000 \
-        --eval_strategy="no" \
+        --eval_strategy="steps" \
+        --eval_steps=500 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
         --checkpointing_step=1000 \
@@ -264,7 +319,8 @@ else
         --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
         --eval_batch_size=32 \
         --max_train_steps=10000 \
-        --eval_strategy="no" \
+        --eval_strategy="steps" \
+        --eval_steps=500 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
         --checkpointing_step=1000 \

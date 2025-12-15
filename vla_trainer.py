@@ -26,6 +26,10 @@ import os
 
 import numpy as np
 import torch
+
+import matplotlib
+matplotlib.use('Agg')  # Prevents "Display not found" errors and local pop-ups on cluster
+
 import matplotlib.pyplot as plt
 from PIL import Image
 from packaging import version
@@ -188,9 +192,12 @@ class VLATrainer(Trainer):
 
     def log_wandb_visualizations(self, model, dataloader, prefix):
         """
-        Generates predictions for a small batch, creates plots comparing GT vs Pred actions,
-        and logs them to WandB.
+        Generates predictions and logs plots to WandB.
+        Controlled by env var WANDB_ENABLE_PLOTS.
         """
+        if os.getenv("WANDB_ENABLE_PLOTS", "true").lower() != "true":
+            return
+
         # Only log on main process and if wandb is enabled
         if not self.is_world_process_zero():
             return
