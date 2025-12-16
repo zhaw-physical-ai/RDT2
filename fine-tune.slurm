@@ -41,6 +41,14 @@ export UV_CACHE_DIR="$BASE_SCRATCH/uv_cache_shared"
 export TORCH_HOME="$BASE_SCRATCH/torch_cache"
 export WANDB_DIR="$BASE_SCRATCH/wandb"
 
+# Crete Scratch Dirs
+mkdir -p "$SCRATCH_DATA_ROOT"
+mkdir -p "$OUTPUT_DIR"
+mkdir -p "$HF_HOME"
+mkdir -p "$UV_CACHE_DIR"
+mkdir -p "$TORCH_HOME"
+mkdir -p "$WANDB_DIR"
+
 # Optimizations
 export OMP_NUM_THREADS=8
 export MKL_NUM_THREADS=8
