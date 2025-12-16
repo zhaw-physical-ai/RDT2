@@ -62,8 +62,12 @@ def train(args):
             # TODO: removed this for accelerate compatability
             device_map=None,
         )
-        model.add_adapter(lora_config)
-        model.enable_adapters()
+
+        # Ensure we don't double-inject adapters
+        if not hasattr(model, "peft_config"):
+            model.add_adapter(lora_config)
+            model.enable_adapters()
+
         model = prepare_model_for_kbit_training(model)
         model = get_peft_model(model, lora_config)
     else:
