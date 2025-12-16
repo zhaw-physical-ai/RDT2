@@ -1,5 +1,6 @@
 import socket
 from functools import partial
+from pathlib import Path
 
 import torch
 import yaml
@@ -95,6 +96,15 @@ def train(args):
         hostname = socket.gethostname()
         dataset_config_str = f.read().format(hostname=hostname)
         dataset_config = yaml.safe_load(dataset_config_str)
+
+    print("=" * 50)
+    print("Dataset path:", str(args.dataset))
+    print("Dataset available:", Path(str(args.dataset)).is_file())
+    print("Dataset configuration:")
+    print(dataset_config)
+    print("Instruction available:", Path(dataset_config["kwargs"]["instruction_path"]).is_file())
+    print("Normalizer available:", Path(dataset_config["kwargs"]["normalizer_path"]).is_file())
+    print("=" * 50)
 
     instructions, train_ds = get_instructions_and_blended_train_dataset(dataset_config)
     
