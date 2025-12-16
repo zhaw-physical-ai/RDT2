@@ -55,7 +55,7 @@ def get_instructions_and_blended_train_dataset(config):
         instructions.update(config["kwargs"]["addtional_instructions"])
     
     if config["type"] == "single":
-        print(f"Using single dataset for training: {config['name']}")
+        print(f"Using single dataset for training: {config['dataset_name']}")
         return instructions, get_train_dataset(config["shards_dir"])
     
     # resolve the corresponding shards_dir

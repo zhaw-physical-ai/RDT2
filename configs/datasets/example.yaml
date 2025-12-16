@@ -1,4 +1,4 @@
-name: bimanual/ur_example
+dataset_name: bimanual/ur_example  # was actually name but seems wrong in the code
 type: single
 shards_dir: /cluster/home/sage/RDT2/data_shards/shards
 kwargs:

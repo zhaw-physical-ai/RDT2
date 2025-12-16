@@ -135,7 +135,7 @@ REAL_SHARDS_DIR=$(find "$SCRATCH_DATA_ROOT" -name "*.tar" -print -quit | xargs d
 GENERATED_CONFIG="$SCRATCH_DATA_ROOT/slurm_config.yaml"
 
 cat <<EOF > "$GENERATED_CONFIG"
-name: bimanual/ur_example
+dataset_name: bimanual/ur_example
 type: single
 shards_dir: ${REAL_SHARDS_DIR}
 kwargs:
