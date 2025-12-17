@@ -18,23 +18,19 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 
 
 import time
-from typing import TYPE_CHECKING, List, Optional, Union
 import io
-import os
+from typing import TYPE_CHECKING, List, Optional, Union
 
 # isort: on
 
 import numpy as np
 import torch
-
-import matplotlib
-matplotlib.use('Agg')  # Prevents "Display not found" errors and local pop-ups on cluster
-
+import wandb
 import matplotlib.pyplot as plt
 from PIL import Image
+
 from packaging import version
 from torch.utils.data import DataLoader, Dataset
-import wandb
 
 from transformers import __version__
 from transformers.integrations.deepspeed import deepspeed_init
@@ -96,31 +92,24 @@ if TYPE_CHECKING:
 class VLATrainer(Trainer):
 
     def __init__(
-            self,
-            num_eval_datasets: int = 2,
-            num_eval_batches: int = 4,
-            use_default_collate_fn_for_eval: bool = False,
-            processor=None,
-            vae=None,
-            *args,
-            **kwargs
+        self,
+        num_eval_datasets: int = 2,
+        num_eval_batches: int = 4,
+        use_default_collate_fn_for_eval: bool = False,
+        *args,
+        **kwargs
     ):
         """Initializes VLATrainer.
 
         Args:
             num_eval_datasets (int, optional): Number of evaluation datasets to use. Defaults to 3.
             num_eval_batches (int, optional): Number of batches to evaluate for each dataset. Defaults to 10.
-            processor: The HuggingFace processor/tokenizer.
-            vae: The VQ-VAE model used for action encoding/decoding.
         """
         super().__init__(*args, **kwargs)
 
         self.num_eval_datasets = num_eval_datasets
         self.num_eval_batches = num_eval_batches
         self.use_default_collate_fn_for_eval = use_default_collate_fn_for_eval
-
-        self.processor = processor
-        self.vae = vae
 
         # initialize the index of the evaluation dataset
         # we only evaluate `num_eval_datasets` datasets in a round-robin manner
@@ -189,133 +178,6 @@ class VLATrainer(Trainer):
                 self._eval_dataloaders = {dataloader_key: eval_dataloader}
 
         return self.accelerator.prepare(eval_dataloader)
-
-    def log_wandb_visualizations(self, model, dataloader, prefix):
-        """
-        Generates predictions and logs plots to WandB.
-        Controlled by env var WANDB_ENABLE_PLOTS.
-        """
-        if os.getenv("WANDB_ENABLE_PLOTS", "true").lower() != "true":
-            return
-
-        # Only log on main process and if wandb is enabled
-        if not self.is_world_process_zero():
-            return
-
-        if "wandb" not in self.args.report_to or wandb.run is None:
-            return
-
-        # Simple check to see if we have what we need
-        if self.processor is None or self.vae is None:
-            logger.warning("Processor or VAE not provided to VLATrainer. Skipping visualization logging.")
-            return
-
-        model.eval()
-
-        # Grab one batch from the dataloader
-        try:
-            inputs = next(iter(dataloader))
-        except StopIteration:
-            return
-
-        inputs = self._prepare_inputs(inputs)
-
-        # Limit visualization to first 4 examples
-        batch_size = inputs['input_ids'].shape[0]
-        limit = min(4, batch_size)
-
-        # 1. Generate Predictions (Greedy for deterministic eval)
-        # Estimate max tokens based on VAE structure if available, else default
-        max_new_tokens = 100
-        if hasattr(self.vae, 'pos_id_len') and hasattr(self.vae, 'rot_id_len') and hasattr(self.vae, 'grip_id_len'):
-            max_new_tokens = self.vae.pos_id_len + self.vae.rot_id_len + self.vae.grip_id_len + 10
-
-        with torch.no_grad():
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False
-            )
-
-        # Create WandB Table
-        columns = ["image", "instruction", "action_plot (GT vs Pred)"]
-        table = wandb.Table(columns=columns)
-
-        vocab_size = self.processor.tokenizer.vocab_size
-
-        for i in range(limit):
-            # --- Image ---
-            try:
-                # Assuming pixel_values in inputs, shape (B, ...).
-                # Qwen/VL usually has (B, C, H, W) or similar.
-                if 'pixel_values' in inputs:
-                    img_tensor = inputs['pixel_values'][i]
-                    # If 3D (C, H, W) -> (H, W, C)
-                    if img_tensor.dim() == 3:
-                        img_tensor = img_tensor.permute(1, 2, 0)
-
-                    img_numpy = img_tensor.cpu().float().numpy()
-                    # Simple min-max normalize for display
-                    if img_numpy.max() > img_numpy.min():
-                        img_numpy = (img_numpy - img_numpy.min()) / (img_numpy.max() - img_numpy.min())
-
-                    # Convert to PIL for WandB
-                    image_display = wandb.Image(img_numpy)
-                else:
-                    image_display = wandb.Image(np.zeros((64, 64, 3)))  # Placeholder
-            except Exception as e:
-                image_display = str(e)
-
-            # --- Instruction ---
-            try:
-                # Decode input text (instruction)
-                full_text = self.processor.decode(inputs['input_ids'][i], skip_special_tokens=True)
-                # Heuristic split to separate prompt from response, adjust based on template
-                instruction = full_text.split("assistant")[0][-200:]  # Take last 200 chars of prompt
-            except:
-                instruction = "Text Error"
-
-            # --- Action Plotting ---
-            try:
-                # 1. Extract GT Action Indices
-                gt_token_ids = inputs['labels'][i]
-                gt_token_ids = gt_token_ids[gt_token_ids != -100]  # Remove padding
-
-                # Reverse mapping: token_id = vocab_size - (action_id + 1)
-                # action_id = vocab_size - token_id - 1
-                gt_indices = vocab_size - gt_token_ids.cpu().numpy() - 1
-
-                # 2. Extract Predicted Action Indices
-                # We generated 'max_new_tokens'. We assume the last N tokens are the action.
-                # Or we can scan for the start of the action tokens.
-                # For simplicity in visualization, we take the last len(gt) tokens or similar.
-                pred_token_ids = generated_ids[i]
-                # Slice the newly generated part (approximate logic)
-                pred_token_ids = pred_token_ids[-len(gt_indices):]
-                pred_indices = vocab_size - pred_token_ids.cpu().numpy() - 1
-
-                # 3. Plot
-                plt.figure(figsize=(10, 4))
-                plt.plot(gt_indices, label='Ground Truth (VAE Indices)', marker='o', alpha=0.6)
-                plt.plot(pred_indices, label='Prediction (VAE Indices)', marker='x', alpha=0.6, linestyle='--')
-                plt.title("Action Sequence Comparison")
-                plt.xlabel("Step")
-                plt.ylabel("VAE Codebook Index")
-                plt.legend()
-                plt.grid(True, alpha=0.3)
-
-                buf = io.BytesIO()
-                plt.savefig(buf, format='png')
-                plt.close()
-                buf.seek(0)
-                plot_img = wandb.Image(Image.open(buf))
-            except Exception as e:
-                plot_img = f"Plotting Error: {e}"
-
-            table.add_data(image_display, instruction, plot_img)
-
-        # Log to wandb
-        wandb.log({f"{prefix}/visualizations": table})
 
     def evaluation_loop(
         self,
@@ -392,8 +254,6 @@ class VLATrainer(Trainer):
             "action_mse_error_width": EvalLoopContainer(args.eval_do_concat_batches, padding_index=-100),
         }
 
-        metrics = None
-
         # Will be useful when we have an iterable dataset so don't know its length.
         observed_num_examples = 0
 
@@ -468,11 +328,6 @@ class VLATrainer(Trainer):
             if not key.startswith(f"{metric_key_prefix}_"):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
-        try:
-            self.log_wandb_visualizations(model, dataloader, metric_key_prefix)
-        except Exception as e:
-            logger.warning(f"Failed to log visualizations to WandB: {e}")
-
         return EvalLoopOutput(predictions=None, label_ids=None, metrics=metrics, num_samples=num_samples)
 
     def evaluate(
@@ -545,5 +400,145 @@ class VLATrainer(Trainer):
                 (self.eval_dataset_index + self.num_eval_datasets)
                     % total_eval_datasets
             )
-        
+
         return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Overridden compute_loss to inject WandB logging for VLA predictions.
+        Calls super() to maintain all original Trainer logic (FSDP, deepspeed, etc).
+        """
+        # 1. Create a shallow copy of inputs for logging.
+        #    Standard Trainer.compute_loss() might .pop("labels") from 'inputs'.
+        logging_inputs = {k: v for k, v in inputs.items()}
+
+        # 2. Call the parent loss computation
+        #    Force return_outputs=True to get logits for logging.
+        loss, outputs = super().compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
+
+        # 3. Custom Logging Logic
+        #    Check strictly for main process and logging steps to avoid slowdowns.
+        if (self.args.report_to and "wandb" in self.args.report_to and
+                self.state.global_step % self.args.logging_steps == 0 and
+                self.accelerator.is_main_process):
+
+            try:
+                self._log_vla_predictions(logging_inputs, outputs)
+            except Exception as e:
+                # Don't crash training if logging fails
+                logger.warning(f"Failed to log VLA predictions to WandB: {e}")
+
+        # 4. Return what the caller expected
+        return (loss, outputs) if return_outputs else loss
+
+    def _log_vla_predictions(self, inputs, outputs):
+        """
+        Helper to decode and log VLA inputs/outputs to WandB.
+        Requires processor, vae, and normalizer to be attached to self.
+        """
+        # Ensure helper objects exist (must be attached in train.py)
+        if not hasattr(self, 'processor') or not hasattr(self, 'vae') or not hasattr(self, 'normalizer'):
+            return
+
+        tokenizer = self.processor.tokenizer
+        vae = self.vae
+        normalizer = self.normalizer
+
+        # Use the first sample in the batch
+        idx = 0
+        input_ids = inputs["input_ids"][idx]
+
+        # Determine labels: check inputs first, then fallback to self.label_names if standard trainer logic removed them
+        labels = inputs.get("labels")
+        if labels is None:
+            return
+
+            # outputs.logits shape: [batch, seq_len, vocab_size]
+        pred_logits = outputs.logits[idx]
+        pred_token_ids = torch.argmax(pred_logits, dim=-1)
+
+        # --- 1. Decode Text (Instruction) ---
+        # Find where the assistant response starts (where labels are not -100)
+        response_mask = (labels[idx] != -100)
+        if not response_mask.any():
+            return
+
+            # Everything before the response is the instruction
+        response_start_idx = torch.where(response_mask)[0][0]
+        instruction_text = tokenizer.decode(input_ids[:response_start_idx], skip_special_tokens=True)
+
+        # --- 2. Decode Actions ---
+        gt_segment_ids = labels[idx][response_mask]
+        pred_segment_ids = pred_token_ids[response_mask]
+
+        vocab_size = tokenizer.vocab_size
+
+        def decode_actions_from_tokens(token_ids):
+            # Reverse collator mapping: action_tokens = vocab_size - token_id - 1
+            # Note: This logic depends on the specific collator used in train.py
+            vae_indices = vocab_size - token_ids - 1
+
+            # Filter valid VAE indices (>= 0)
+            valid_mask = vae_indices >= 0
+            if not valid_mask.any():
+                return None
+
+            valid_indices = vae_indices[valid_mask]
+
+            with torch.no_grad():
+                try:
+                    # Decode via VAE. Expected input often [batch, seq_len] or [seq_len]
+                    if valid_indices.dim() == 1:
+                        valid_indices = valid_indices.unsqueeze(0)
+
+                    actions = vae.decode(valid_indices)
+                    # Result is [1, seq_len, action_dim], squeeze batch
+                    actions = actions.squeeze(0)
+                except Exception:
+                    return None
+            return actions
+
+        gt_actions = decode_actions_from_tokens(gt_segment_ids)
+        pred_actions = decode_actions_from_tokens(pred_segment_ids)
+
+        if gt_actions is None or pred_actions is None:
+            return
+
+        # --- 3. Un-normalize ---
+        # Move to CPU and numpy
+        gt_actions = normalizer.unnormalize(gt_actions).float().cpu().numpy()
+        pred_actions = normalizer.unnormalize(pred_actions).float().cpu().numpy()
+
+        # --- 4. Plotting ---
+        # Dynamically determine dimensions
+        if len(gt_actions.shape) < 2:
+            return  # Safety check
+
+        num_dims = gt_actions.shape[1]
+        fig, axes = plt.subplots(num_dims, 1, figsize=(8, 2 * num_dims), sharex=True)
+        if num_dims == 1: axes = [axes]
+
+        for d in range(num_dims):
+            axes[d].plot(gt_actions[:, d], label="Ground Truth", color="black", linestyle="--", alpha=0.7)
+
+            # Crop prediction if lengths differ (e.g. if one stopped early or ran longer)
+            min_len = min(len(gt_actions), len(pred_actions))
+            axes[d].plot(pred_actions[:min_len, d], label="Prediction", color="blue")
+
+            axes[d].set_ylabel(f"Dim {d}")
+            if d == 0: axes[d].legend(loc="upper right")
+
+        plt.suptitle(f"Step {self.state.global_step}")
+        plt.tight_layout()
+
+        # Save plot to buffer
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plot_image = Image.open(buf)
+        plt.close(fig)
+
+        # Log to wandb
+        wandb.log({
+            "train/action_plot": wandb.Image(plot_image, caption=instruction_text[:100]),
+        }, step=self.state.global_step)

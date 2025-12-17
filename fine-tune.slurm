@@ -17,7 +17,7 @@ set -e
 # --- USER CONFIGURATION ---
 # Options: "full", "lora", "rdt"
 TRAIN_MODE="full"
-LOG_PLOTS="true"  # Set to "false" to disable heavy plotting
+LOG_PLOTS="true"  # Set to "false" to disable heavy plotting -> does not yet work with our datasets
 
 # --- 1. Environment & Path Setup ---
 export BASE_SCRATCH="/scratch"
@@ -295,7 +295,7 @@ elif [ "$TRAIN_MODE" == "lora" ]; then
         --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
         --eval_batch_size=32 \
         --max_train_steps=10000 \
-        --eval_strategy="steps" \
+        --eval_strategy="no" \
         --eval_steps=500 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
@@ -327,7 +327,7 @@ else
         --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
         --eval_batch_size=32 \
         --max_train_steps=10000 \
-        --eval_strategy="steps" \
+        --eval_strategy="no" \
         --eval_steps=500 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
