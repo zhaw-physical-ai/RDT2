@@ -63,10 +63,9 @@ def train(args):
             device_map=None,
         )
 
-        # Ensure we don't double-inject adapters
-        if not hasattr(model, "peft_config"):
-            model.add_adapter(lora_config)
-            model.enable_adapters()
+        # TODO: This was in the original code but model is already wrapped
+        # model.add_adapter(lora_config)
+        # model.enable_adapters()
 
         model = prepare_model_for_kbit_training(model)
         model = get_peft_model(model, lora_config)
@@ -212,6 +211,7 @@ def train(args):
         weight_decay=args.adam_weight_decay,
         adam_epsilon=args.adam_epsilon,
         max_grad_norm=args.max_grad_norm,
+        label_names=["labels"],
         logging_steps=args.logging_steps,
         save_strategy="steps",
         save_steps=args.checkpointing_steps,
