@@ -4,7 +4,9 @@
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:h200sxm:2
+##SBATCH --gres=gpu:h200sxm:2
+#SBATCH --gres=gpu:1
+#SBATCH --constraint="h200sxm|h100pcie|a100sxm"
 #SBATCH --mem=200G
 #SBATCH --account=cai_cv
 #SBATCH --partition=gpu_top
@@ -16,8 +18,7 @@ set -e
 
 # --- USER CONFIGURATION ---
 # Options: "full", "lora", "rdt"
-TRAIN_MODE="full"
-LOG_PLOTS="true"  # Set to "false" to disable heavy plotting -> does not yet work with our datasets
+TRAIN_MODE="lora"
 
 # --- 1. Environment & Path Setup ---
 export BASE_SCRATCH="/scratch"
@@ -25,9 +26,6 @@ export WORK_DIR="$SLURM_SUBMIT_DIR"
 export PERSISTENT_DATA_DIR="$WORK_DIR/data_shards"
 export SCRATCH_DATA_ROOT="$BASE_SCRATCH/rdt2_data"
 export JOB_VENV="$BASE_SCRATCH/venvs/rdt2_node_venv"
-
-# Export for Python
-export WANDB_ENABLE_PLOTS="$LOG_PLOTS"
 
 # Compiler flags
 export CFLAGS="-I/usr/include"
