@@ -7,7 +7,6 @@
 ##SBATCH --gres=gpu:h200sxm:2
 #SBATCH --nodelist=trinity,sanjose
 #SBATCH --gres=gpu:1
-#SBATCH --constraint="h200sxm|h100pcie|a100sxm"
 #SBATCH --mem=200G
 #SBATCH --account=cai_cv
 #SBATCH --partition=gpu_top
