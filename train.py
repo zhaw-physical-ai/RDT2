@@ -118,41 +118,37 @@ def train(args):
     print("=" * 50)
 
     instructions, train_ds = get_instructions_and_blended_train_dataset(dataset_config)
-    
+
+    # If the config didn't provide a specific eval set, split the train set
+    eval_ds = None
     if args.eval_strategy != "no":
-        eval_ds = get_eval_datasets(dataset_config)
+        # A. Try to load specific eval dataset from config
+        try:
+            print("Attempting to load evaluation dataset from config...")
+            eval_ds = get_eval_datasets(dataset_config)
+        except (TypeError, KeyError, ValueError) as e:
+            # Catches the 'UmiVideoDataset missing arguments' error
+            print(f"  > Note: Config lacks specific eval paths (Error: {e}).")
 
-        # If the config didn't provide a specific eval set, split the train set
-        eval_ds = None
-        if args.eval_strategy != "no":
-            # A. Try to load specific eval dataset from config
-            try:
-                print("Attempting to load evaluation dataset from config...")
-                eval_ds = get_eval_datasets(dataset_config)
-            except (TypeError, KeyError, ValueError) as e:
-                # Catches the 'UmiVideoDataset missing arguments' error
-                print(f"  > Note: Config lacks specific eval paths (Error: {e}).")
-                eval_ds = None
+        # B. Fallback: If A failed or returned None, split the training set
+        if eval_ds is None:
+            print("  > Falling back to creating validation split from training data...")
 
-            # B. Fallback: If A failed or returned None, split the training set
-            if eval_ds is None:
-                print("  > Falling back to creating validation split from training data...")
+            if hasattr(train_ds, "__len__"):
+                total_size = len(train_ds)
+                # Use 5%, clamped between 1 and 2000 samples
+                eval_size = min(max(int(total_size * 0.05), 1), 2000)
+                train_size = total_size - eval_size
 
-                if hasattr(train_ds, "__len__"):
-                    total_size = len(train_ds)
-                    # Use 5%, clamped between 1 and 2000 samples
-                    eval_size = min(max(int(total_size * 0.05), 1), 2000)
-                    train_size = total_size - eval_size
-
-                    # Deterministic split
-                    generator = torch.Generator().manual_seed(args.seed if args.seed else 42)
-                    train_ds, eval_ds = torch.utils.data.random_split(
-                        train_ds, [train_size, eval_size], generator=generator
-                    )
-                    print(f"  > Split successful: Train={len(train_ds)}, Eval={len(eval_ds)}")
-                else:
-                    print("  > Warning: Dataset is Iterable. Using train_ds as eval_ds (Data Leakage Warning).")
-                    eval_ds = train_ds
+                # Deterministic split
+                generator = torch.Generator().manual_seed(args.seed if args.seed else 42)
+                train_ds, eval_ds = torch.utils.data.random_split(
+                    train_ds, [train_size, eval_size], generator=generator
+                )
+                print(f"  > Split successful: Train={len(train_ds)}, Eval={len(eval_ds)}")
+            else:
+                print("  > Warning: Dataset is Iterable. Using train_ds as eval_ds (Data Leakage Warning).")
+                eval_ds = train_ds
 
     else:
         eval_ds = None
