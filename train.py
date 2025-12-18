@@ -67,6 +67,10 @@ def train(args):
         # model.add_adapter(lora_config)
         # model.enable_adapters()
 
+        # TODO; This can be added - it is needed for Lora + DDP but loss drops to zero
+        # model = prepare_model_for_kbit_training(model,
+        #     use_gradient_checkpointing=args.gradient_checkpointing,
+        #     gradient_checkpointing_kwargs={"use_reentrant": False})
         model = prepare_model_for_kbit_training(model)
         model = get_peft_model(model, lora_config)
     else:
@@ -119,26 +123,36 @@ def train(args):
         eval_ds = get_eval_datasets(dataset_config)
 
         # If the config didn't provide a specific eval set, split the train set
-        if eval_ds is None:
-            print("No specific validation dataset found in config. Splitting training set...")
+        eval_ds = None
+        if args.eval_strategy != "no":
+            # A. Try to load specific eval dataset from config
+            try:
+                print("Attempting to load evaluation dataset from config...")
+                eval_ds = get_eval_datasets(dataset_config)
+            except (TypeError, KeyError, ValueError) as e:
+                # Catches the 'UmiVideoDataset missing arguments' error
+                print(f"  > Note: Config lacks specific eval paths (Error: {e}).")
+                eval_ds = None
 
-            # Check if dataset is Sizable (Map-style)
-            if hasattr(train_ds, "__len__"):
-                total_size = len(train_ds)
-                # Use 5% for eval, or at least 1 sample, max 1000 samples to keep it fast
-                eval_size = min(max(int(total_size * 0.05), 1), 1000)
-                train_size = total_size - eval_size
+            # B. Fallback: If A failed or returned None, split the training set
+            if eval_ds is None:
+                print("  > Falling back to creating validation split from training data...")
 
-                # Deterministic split based on seed
-                generator = torch.Generator().manual_seed(args.seed if args.seed else 42)
-                train_ds, eval_ds = torch.utils.data.random_split(
-                    train_ds, [train_size, eval_size], generator=generator
-                )
-                print(f"Split created: Train={len(train_ds)}, Eval={len(eval_ds)}")
-            else:
-                print(
-                    "Warning: Dataset is Iterable (Streaming). Cannot random_split. Using train_ds as eval_ds (be careful of data leakage).")
-                eval_ds = train_ds
+                if hasattr(train_ds, "__len__"):
+                    total_size = len(train_ds)
+                    # Use 5%, clamped between 1 and 2000 samples
+                    eval_size = min(max(int(total_size * 0.05), 1), 2000)
+                    train_size = total_size - eval_size
+
+                    # Deterministic split
+                    generator = torch.Generator().manual_seed(args.seed if args.seed else 42)
+                    train_ds, eval_ds = torch.utils.data.random_split(
+                        train_ds, [train_size, eval_size], generator=generator
+                    )
+                    print(f"  > Split successful: Train={len(train_ds)}, Eval={len(eval_ds)}")
+                else:
+                    print("  > Warning: Dataset is Iterable. Using train_ds as eval_ds (Data Leakage Warning).")
+                    eval_ds = train_ds
 
     else:
         eval_ds = None
@@ -211,7 +225,9 @@ def train(args):
             input_ids = batch["input_ids"][i].tolist()
             try:
                 start_index = input_ids.index(assistant_marker_id)
-            except ValueError:
+            except ValueError as e:
+                print("assistant_marker_id not found...")
+                print(e)
                 # TODO(bangguo): inspect the occurrence of this error
                 start_index = len(input_ids)
             labels[i, : start_index - 1] = -100
@@ -256,6 +272,7 @@ def train(args):
         dataloader_num_workers=args.dataloader_num_workers,
         # dataloader_persistent_workers=True, # NOTE: DO NOT TOGGLE this on, which may result threads leakage
         gradient_checkpointing=args.gradient_checkpointing,
+        # gradient_checkpointing_kwargs={"use_reentrant": False}, # TODO: This can be added but loss might become 0
         log_level=args.log_level,
         ignore_data_skip=isinstance(train_ds, torch.utils.data.IterableDataset),    # Do not skip the data when use IterableDataset, otherwise the resume will be EXTREMELY SLOW
         accelerator_config={
