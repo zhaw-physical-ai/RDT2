@@ -96,6 +96,9 @@ class VLATrainer(Trainer):
         num_eval_datasets: int = 2,
         num_eval_batches: int = 4,
         use_default_collate_fn_for_eval: bool = False,
+        processor = None,
+        vae = None,
+        normalizer = None,
         *args,
         **kwargs
     ):
@@ -110,6 +113,10 @@ class VLATrainer(Trainer):
         self.num_eval_datasets = num_eval_datasets
         self.num_eval_batches = num_eval_batches
         self.use_default_collate_fn_for_eval = use_default_collate_fn_for_eval
+
+        self.processor = processor
+        self.vae = vae
+        self.normalizer = normalizer
 
         # initialize the index of the evaluation dataset
         # we only evaluate `num_eval_datasets` datasets in a round-robin manner
