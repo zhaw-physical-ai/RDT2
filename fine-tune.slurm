@@ -293,8 +293,8 @@ elif [ "$TRAIN_MODE" == "lora" ]; then
         --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
         --eval_batch_size=32 \
         --max_train_steps=10000 \
-        --eval_strategy="no" \
-        --eval_steps=500 \
+        --eval_strategy="steps" \
+        --eval_steps=200 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
         --checkpointing_step=1000 \
@@ -325,8 +325,8 @@ else
         --gradient_accumulation_steps=$GRAD_ACCUM_STEPS \
         --eval_batch_size=32 \
         --max_train_steps=10000 \
-        --eval_strategy="no" \
-        --eval_steps=500 \
+        --eval_strategy="steps" \
+        --eval_steps=200 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
         --checkpointing_step=1000 \

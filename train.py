@@ -117,6 +117,29 @@ def train(args):
     
     if args.eval_strategy != "no":
         eval_ds = get_eval_datasets(dataset_config)
+
+        # If the config didn't provide a specific eval set, split the train set
+        if eval_ds is None:
+            print("No specific validation dataset found in config. Splitting training set...")
+
+            # Check if dataset is Sizable (Map-style)
+            if hasattr(train_ds, "__len__"):
+                total_size = len(train_ds)
+                # Use 5% for eval, or at least 1 sample, max 1000 samples to keep it fast
+                eval_size = min(max(int(total_size * 0.05), 1), 1000)
+                train_size = total_size - eval_size
+
+                # Deterministic split based on seed
+                generator = torch.Generator().manual_seed(args.seed if args.seed else 42)
+                train_ds, eval_ds = torch.utils.data.random_split(
+                    train_ds, [train_size, eval_size], generator=generator
+                )
+                print(f"Split created: Train={len(train_ds)}, Eval={len(eval_ds)}")
+            else:
+                print(
+                    "Warning: Dataset is Iterable (Streaming). Cannot random_split. Using train_ds as eval_ds (be careful of data leakage).")
+                eval_ds = train_ds
+
     else:
         eval_ds = None
     
@@ -268,6 +291,9 @@ def train(args):
         compute_metrics=compute_metrics,
         num_eval_batches=args.num_eval_batches,
         use_default_collate_fn_for_eval=args.use_default_collate_fn_for_eval,
+        processor=processor,
+        vae=vae,
+        normalizer=normalizer,
     )
 
     if args.resume_from_checkpoint == "latest":
