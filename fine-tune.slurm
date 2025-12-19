@@ -337,7 +337,7 @@ else
         --report_to="wandb" \
         --lr_warmup_steps=500 \
         --dataset="$GENERATED_CONFIG" \
-        --image_corruption \
+        --image_corruption
 fi
 
 # Old arguments we removed for ZHAW DGX:

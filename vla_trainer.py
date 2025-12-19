@@ -121,6 +121,20 @@ class VLATrainer(Trainer):
 
         print(f"DEBUG: VLATrainer Initialized. Processor: {processor is not None}, VAE: {vae is not None}, Normalizer: {normalizer is not None}")
 
+        # Try to determine VAE codebook size for safety checks
+        self.vae_codebook_size = 1024  # Default fallback
+        try:
+            if hasattr(self.vae, 'n_codes'):
+                self.vae_codebook_size = self.vae.n_codes
+            elif hasattr(self.vae, 'num_embeddings'):
+                self.vae_codebook_size = self.vae.num_embeddings
+            # Check for MultiVQVAE specific attributes
+            elif hasattr(self.vae, 'vocab_size'):
+                self.vae_codebook_size = self.vae.vocab_size
+            print(f"DEBUG: Detected VAE codebook size limit: {self.vae_codebook_size}")
+        except:
+            print("DEBUG: Could not determine VAE codebook size, defaulting to 1024")
+
         # initialize the index of the evaluation dataset
         # we only evaluate `num_eval_datasets` datasets in a round-robin manner
         self.eval_dataset_index = 0
@@ -310,8 +324,16 @@ class VLATrainer(Trainer):
                     traceback.print_exc()
 
             with torch.no_grad():
+                # FIX: Unbatch inputs into a list of examples for compute_metrics
+                # utils.py expects a list of dicts, but inputs is a dict of batched tensors
+                batch_sz = inputs["input_ids"].shape[0]
+                examples_list = [
+                    {k: v[i] for k, v in inputs.items()}
+                    for i in range(batch_sz)
+                ]
+
                 metrics_per_step = self.compute_metrics(
-                    model=model, examples=inputs
+                    model=model, examples=examples_list
                 )
 
             if is_torch_xla_available():
@@ -536,8 +558,11 @@ class VLATrainer(Trainer):
             # Note: This logic depends on the specific collator used in train.py
             vae_indices = vocab_size - token_ids - 1
 
-            # Filter valid VAE indices (>= 0)
-            valid_mask = vae_indices >= 0
+            # FIX: Filter indices strictly within [0, codebook_size)
+            # The model might hallucinate tokens that result in valid positive integers
+            # but are larger than the VAE codebook (e.g. text tokens).
+            valid_mask = (vae_indices >= 0) & (vae_indices < self.vae_codebook_size)
+
             if not valid_mask.any():
                 print("DEBUG: No valid VAE indices found after reversing vocab.")  # DEBUG
                 return None
