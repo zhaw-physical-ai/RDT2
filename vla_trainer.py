@@ -167,7 +167,7 @@ class VLATrainer(Trainer):
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,
-            "shuffle": True # shuffle test dataloader every time
+            "shuffle": False # TODO: set to False, does not work with DDP
         }
 
         if not isinstance(eval_dataset, torch.utils.data.IterableDataset):
@@ -278,6 +278,17 @@ class VLATrainer(Trainer):
                     batch_size = observed_batch_size
 
             inputs = self._prepare_inputs(inputs)
+
+            # Log first batch of evaluation to WandB
+            if step == 0 and self.is_world_process_zero() and self.args.report_to and "wandb" in self.args.report_to:
+                try:
+                    with torch.no_grad():
+                         # Perform a forward pass purely for visualization logging
+                        outputs = model(**inputs)
+                        self._log_vla_predictions(inputs, outputs, prefix="eval")
+                except Exception as e:
+                    logger.warning(f"Failed to log eval VLA predictions: {e}")
+
             with torch.no_grad():
                 metrics_per_step = self.compute_metrics(
                     model=model, examples=inputs
@@ -430,7 +441,7 @@ class VLATrainer(Trainer):
                 self.accelerator.is_main_process):
 
             try:
-                self._log_vla_predictions(logging_inputs, outputs)
+                self._log_vla_predictions(logging_inputs, outputs, prefix="train")
             except Exception as e:
                 # Don't crash training if logging fails
                 logger.warning(f"Failed to log VLA predictions to WandB: {e}")
@@ -438,7 +449,7 @@ class VLATrainer(Trainer):
         # 4. Return what the caller expected
         return (loss, outputs) if return_outputs else loss
 
-    def _log_vla_predictions(self, inputs, outputs):
+    def _log_vla_predictions(self, inputs, outputs, prefix="train"):
         """
         Helper to decode and log VLA inputs/outputs to WandB.
         Requires processor, vae, and normalizer to be attached to self.
@@ -547,5 +558,5 @@ class VLATrainer(Trainer):
 
         # Log to wandb
         wandb.log({
-            "train/action_plot": wandb.Image(plot_image, caption=instruction_text[:100]),
+            f"{prefix}/action_plot": wandb.Image(plot_image, caption=instruction_text[:100]),
         }, step=self.state.global_step)
