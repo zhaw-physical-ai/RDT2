@@ -204,7 +204,7 @@ echo "Detected $NUM_GPUS GPUs."
 
 # 3. Determine Settings based on Mode
 if [ "$TRAIN_MODE" == "lora" ]; then
-    PHYSICAL_BATCH_PER_GPU=64
+    PHYSICAL_BATCH_PER_GPU=32
     TARGET_GLOBAL_BATCH_SIZE=96
     BASE_LR=1e-4
     BASE_BATCH_SCALING=96
@@ -307,8 +307,7 @@ elif [ "$TRAIN_MODE" == "lora" ]; then
         --dataset="$GENERATED_CONFIG" \
         --image_corruption \
         --use_lora \
-        --num_eval_batches=5 \
-        --use_default_collate_fn_for_eval
+        --num_eval_batches=5
 
 else
     # === FULL FINE-TUNING MODE (Default) ===
@@ -339,8 +338,8 @@ else
         --lr_warmup_steps=500 \
         --dataset="$GENERATED_CONFIG" \
         --image_corruption \
-        --use_default_collate_fn_for_eval
 fi
 
 # Old arguments we removed for ZHAW DGX:
 #    --deepspeed="scripts/zero1.json" \
+# --use_default_collate_fn_for_eval

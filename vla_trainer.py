@@ -159,10 +159,22 @@ class VLATrainer(Trainer):
             else self.eval_dataset
         )
 
-        collate_fn = (
-            None if self.use_default_collate_fn_for_eval
-            else lambda examples: examples
-        )
+
+        # TODO: was
+        # collate_fn = (
+        #     None if self.use_default_collate_fn_for_eval
+        #     else lambda examples: examples
+        # )
+
+        if self.use_default_collate_fn_for_eval:
+            # If the flag is set, it implies we want standard torch collation, BUT
+            # standard torch collation crashes on PIL images.
+            # We just force the standard one
+            print("DEBUG WARNING: use_default_collate_fn_for_eval is True, but falling back to self.data_collator to avoid PIL errors.")
+            collate_fn = self.data_collator
+        else:
+            collate_fn = self.data_collator
+
         # NOTE: we use customized collate_fn for evaluation
         dataloader_params = {
             "batch_size": self.args.eval_batch_size,
@@ -289,7 +301,7 @@ class VLATrainer(Trainer):
                 print("DEBUG: Attempting to log EVAL predictions to WandB...")  # DEBUG
                 try:
                     with torch.no_grad():
-                         # Perform a forward pass purely for visualization logging
+                        # Perform a forward pass purely for visualization logging
                         outputs = model(**inputs)
                         self._log_vla_predictions(inputs, outputs, prefix="eval")
                 except Exception as e:
@@ -538,9 +550,12 @@ class VLATrainer(Trainer):
                     if valid_indices.dim() == 1:
                         valid_indices = valid_indices.unsqueeze(0)
 
-                    # DEBUG: Check VAE device
-                    if valid_indices.device != vae.device:
-                        valid_indices = valid_indices.to(vae.device)
+                    # DEBUG: FIX for AttributeError 'MultiVQVAE' object has no attribute 'device'
+                    # We access the device via parameters since VAE is a custom module
+                    vae_device = next(vae.parameters()).device
+
+                    if valid_indices.device != vae_device:
+                        valid_indices = valid_indices.to(vae_device)
 
                     actions = vae.decode(valid_indices)
                     # Result is [1, seq_len, action_dim], squeeze batch
