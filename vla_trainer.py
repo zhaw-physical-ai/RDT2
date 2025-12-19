@@ -19,6 +19,7 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 
 import time
 import io
+import traceback
 from typing import TYPE_CHECKING, List, Optional, Union
 
 # isort: on
@@ -118,6 +119,8 @@ class VLATrainer(Trainer):
         self.vae = vae
         self.normalizer = normalizer
 
+        print(f"DEBUG: VLATrainer Initialized. Processor: {processor is not None}, VAE: {vae is not None}, Normalizer: {normalizer is not None}")
+
         # initialize the index of the evaluation dataset
         # we only evaluate `num_eval_datasets` datasets in a round-robin manner
         self.eval_dataset_index = 0
@@ -198,6 +201,7 @@ class VLATrainer(Trainer):
         Prediction/evaluation loop, shared by `Trainer.evaluate()` and `Trainer.predict()`.
 
         """
+        print(f"DEBUG: Starting evaluation loop: {description}")  # DEBUG
         args = self.args
 
         # if eval is called w/o train, handle model prep here
@@ -267,6 +271,7 @@ class VLATrainer(Trainer):
         # Main evaluation loop
         for step, inputs in enumerate(dataloader):
             if step >= self.num_eval_batches:
+                print(f"DEBUG: Stopping eval at step {step} due to num_eval_batches limit.")  # DEBUG
                 break
 
             # Update the observed num examples
@@ -281,6 +286,7 @@ class VLATrainer(Trainer):
 
             # Log first batch of evaluation to WandB
             if step == 0 and self.is_world_process_zero() and self.args.report_to and "wandb" in self.args.report_to:
+                print("DEBUG: Attempting to log EVAL predictions to WandB...")  # DEBUG
                 try:
                     with torch.no_grad():
                          # Perform a forward pass purely for visualization logging
@@ -288,6 +294,8 @@ class VLATrainer(Trainer):
                         self._log_vla_predictions(inputs, outputs, prefix="eval")
                 except Exception as e:
                     logger.warning(f"Failed to log eval VLA predictions: {e}")
+                    print(f"DEBUG ERROR: Eval logging failed: {e}")  # DEBUG
+                    traceback.print_exc()
 
             with torch.no_grad():
                 metrics_per_step = self.compute_metrics(
@@ -309,6 +317,10 @@ class VLATrainer(Trainer):
 
                 del metrics_per_step
                 torch.cuda.empty_cache()
+
+            # [Add this small debug print in the loop]
+            if step % 10 == 0:
+                print(f"DEBUG: Eval Step {step} processed.")
 
         # After all calls to `.gather_function`, reset to `gather_for_metrics`:
         self.gather_function = self.accelerator.gather_for_metrics
@@ -426,6 +438,10 @@ class VLATrainer(Trainer):
         Overridden compute_loss to inject WandB logging for VLA predictions.
         Calls super() to maintain all original Trainer logic (FSDP, deepspeed, etc).
         """
+        # DEBUG: Check if this function is called
+        if self.state.global_step % 10 == 0 and self.accelerator.is_main_process:
+            print(f"DEBUG: Inside compute_loss at step {self.state.global_step}")
+
         # 1. Create a shallow copy of inputs for logging.
         #    Standard Trainer.compute_loss() might .pop("labels") from 'inputs'.
         logging_inputs = {k: v for k, v in inputs.items()}
@@ -440,11 +456,14 @@ class VLATrainer(Trainer):
                 self.state.global_step % self.args.logging_steps == 0 and
                 self.accelerator.is_main_process):
 
+            print(f"DEBUG: Triggering Training Visualization at step {self.state.global_step}")  # DEBUG
             try:
                 self._log_vla_predictions(logging_inputs, outputs, prefix="train")
             except Exception as e:
                 # Don't crash training if logging fails
                 logger.warning(f"Failed to log VLA predictions to WandB: {e}")
+                print(f"DEBUG ERROR: Train logging failed: {e}")  # DEBUG
+                traceback.print_exc()
 
         # 4. Return what the caller expected
         return (loss, outputs) if return_outputs else loss
@@ -454,8 +473,11 @@ class VLATrainer(Trainer):
         Helper to decode and log VLA inputs/outputs to WandB.
         Requires processor, vae, and normalizer to be attached to self.
         """
+        print(f"DEBUG: Entering _log_vla_predictions ({prefix})")  # DEBUG
+
         # Ensure helper objects exist (must be attached in train.py)
         if not hasattr(self, 'processor') or not hasattr(self, 'vae') or not hasattr(self, 'normalizer'):
+            print("DEBUG FAIL: Missing processor, vae, or normalizer in Trainer.")  # DEBUG
             return
 
         tokenizer = self.processor.tokenizer
@@ -469,6 +491,8 @@ class VLATrainer(Trainer):
         # Determine labels: check inputs first, then fallback to self.label_names if standard trainer logic removed them
         labels = inputs.get("labels")
         if labels is None:
+            print("DEBUG FAIL: 'labels' not found in inputs dict.")  # DEBUG
+            print(f"DEBUG: Available keys: {inputs.keys()}")
             return
 
             # outputs.logits shape: [batch, seq_len, vocab_size]
@@ -479,15 +503,19 @@ class VLATrainer(Trainer):
         # Find where the assistant response starts (where labels are not -100)
         response_mask = (labels[idx] != -100)
         if not response_mask.any():
+            print("DEBUG FAIL: No valid labels (all -100) for this sample.")  # DEBUG
             return
 
             # Everything before the response is the instruction
         response_start_idx = torch.where(response_mask)[0][0]
         instruction_text = tokenizer.decode(input_ids[:response_start_idx], skip_special_tokens=True)
+        print(f"DEBUG: Instruction detected: {instruction_text[:50]}...")  # DEBUG
 
         # --- 2. Decode Actions ---
         gt_segment_ids = labels[idx][response_mask]
         pred_segment_ids = pred_token_ids[response_mask]
+
+        print(f"DEBUG: GT Segment shape: {gt_segment_ids.shape}, Pred Segment shape: {pred_segment_ids.shape}")
 
         vocab_size = tokenizer.vocab_size
 
@@ -499,6 +527,7 @@ class VLATrainer(Trainer):
             # Filter valid VAE indices (>= 0)
             valid_mask = vae_indices >= 0
             if not valid_mask.any():
+                print("DEBUG: No valid VAE indices found after reversing vocab.")  # DEBUG
                 return None
 
             valid_indices = vae_indices[valid_mask]
@@ -509,10 +538,15 @@ class VLATrainer(Trainer):
                     if valid_indices.dim() == 1:
                         valid_indices = valid_indices.unsqueeze(0)
 
+                    # DEBUG: Check VAE device
+                    if valid_indices.device != vae.device:
+                        valid_indices = valid_indices.to(vae.device)
+
                     actions = vae.decode(valid_indices)
                     # Result is [1, seq_len, action_dim], squeeze batch
                     actions = actions.squeeze(0)
-                except Exception:
+                except Exception as e:
+                    print(f"DEBUG ERROR during VAE decode: {e}")
                     return None
             return actions
 
@@ -520,17 +554,25 @@ class VLATrainer(Trainer):
         pred_actions = decode_actions_from_tokens(pred_segment_ids)
 
         if gt_actions is None or pred_actions is None:
+            print("DEBUG FAIL: GT or Pred actions could not be decoded.")  # DEBUG
             return
 
         # --- 3. Un-normalize ---
         # Move to CPU and numpy
-        gt_actions = normalizer.unnormalize(gt_actions).float().cpu().numpy()
-        pred_actions = normalizer.unnormalize(pred_actions).float().cpu().numpy()
+        try:
+            gt_actions = normalizer.unnormalize(gt_actions).float().cpu().numpy()
+            pred_actions = normalizer.unnormalize(pred_actions).float().cpu().numpy()
+        except Exception as e:
+            print(f"DEBUG ERROR during normalization: {e}")
+            return
 
         # --- 4. Plotting ---
         # Dynamically determine dimensions
         if len(gt_actions.shape) < 2:
+            print(f"DEBUG FAIL: Action shape invalid: {gt_actions.shape}")  # DEBUG
             return  # Safety check
+
+        print(f"DEBUG: Generating plot. Dims: {gt_actions.shape[1]}")  # DEBUG
 
         num_dims = gt_actions.shape[1]
         fig, axes = plt.subplots(num_dims, 1, figsize=(8, 2 * num_dims), sharex=True)
@@ -557,6 +599,8 @@ class VLATrainer(Trainer):
         plt.close(fig)
 
         # Log to wandb
+        print(f"DEBUG: Sending to WandB ({prefix})...")  # DEBUG
         wandb.log({
             f"{prefix}/action_plot": wandb.Image(plot_image, caption=instruction_text[:100]),
         }, step=self.state.global_step)
+        print("DEBUG: WandB log successful.")

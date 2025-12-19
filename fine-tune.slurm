@@ -294,10 +294,10 @@ elif [ "$TRAIN_MODE" == "lora" ]; then
         --eval_batch_size=32 \
         --max_train_steps=10000 \
         --eval_strategy="steps" \
-        --eval_steps=200 \
-        --logging_steps=25 \
+        --eval_steps=10 \
+        --logging_steps=5 \
         --checkpoints_total_limit=20 \
-        --checkpointing_step=1000 \
+        --checkpointing_steps=500 \
         --lr_scheduler="cosine" \
         --learning_rate=$LEARNING_RATE \
         --dataloader_num_workers=16 \
@@ -307,6 +307,7 @@ elif [ "$TRAIN_MODE" == "lora" ]; then
         --dataset="$GENERATED_CONFIG" \
         --image_corruption \
         --use_lora \
+        --num_eval_batches=5 \
         --use_default_collate_fn_for_eval
 
 else
@@ -329,7 +330,7 @@ else
         --eval_steps=200 \
         --logging_steps=25 \
         --checkpoints_total_limit=20 \
-        --checkpointing_step=1000 \
+        --checkpointing_steps=1000 \
         --lr_scheduler="cosine" \
         --learning_rate=$LEARNING_RATE \
         --dataloader_num_workers=16 \

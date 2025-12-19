@@ -152,10 +152,10 @@ def train(args):
 
     else:
         eval_ds = None
-    
+
     normalizer = LinearNormalizer.load(dataset_config["kwargs"]["normalizer_path"])
     num_robot = 2
-    
+
     def collate_fn(examples):
         texts = []
         images = []
@@ -171,7 +171,7 @@ def train(args):
                 image = image_corrupt(image)
 
             instruction = instructions.get(example["meta"]["sub_task_instruction_key"], "")
-            
+
             action_tokens = example["action_token"]  # range: [0, num_embeddings)
             action_input_ids = processor.tokenizer.vocab_size - (action_tokens + 1)
 
@@ -229,6 +229,19 @@ def train(args):
             labels[i, : start_index - 1] = -100
         batch["labels"] = labels
 
+        # Only print for the first batch to verify structure
+        if not hasattr(collate_fn, "debug_printed"):
+            print("DEBUG: Collate_fn output keys:", batch.keys())
+            if "labels" in batch:
+                print("DEBUG: Labels shape:", batch["labels"].shape)
+                # Check if we have valid tokens (not all -100)
+                valid_labels = batch["labels"][0][batch["labels"][0] != -100]
+                if len(valid_labels) > 0:
+                    print("DEBUG: Labels sample (non -100):", valid_labels[:10])
+                else:
+                    print("DEBUG: Labels sample (ALL -100) - Potential Issue!")
+            collate_fn.debug_printed = True
+
         return batch
 
     # https://github.com/QwenLM/Qwen2.5-VL/tree/35ba6e18636510de4bf8d4a7caaca3f4f5163a84?tab=readme-ov-file#training
@@ -270,7 +283,8 @@ def train(args):
         gradient_checkpointing=args.gradient_checkpointing,
         # gradient_checkpointing_kwargs={"use_reentrant": False}, # TODO: This can be added but loss might become 0
         log_level=args.log_level,
-        ignore_data_skip=isinstance(train_ds, torch.utils.data.IterableDataset),    # Do not skip the data when use IterableDataset, otherwise the resume will be EXTREMELY SLOW
+        ignore_data_skip=isinstance(train_ds, torch.utils.data.IterableDataset),
+        # Do not skip the data when use IterableDataset, otherwise the resume will be EXTREMELY SLOW
         accelerator_config={
             "dispatch_batches": (
                 False
@@ -293,7 +307,7 @@ def train(args):
         # only use the first instruction for evaluation for instructed SFT
         instruction=None,
         # since validation image is dumped to jpeg, we don't need to apply jpeg compression
-        apply_jpeg_compression=True,   
+        apply_jpeg_compression=True,
     )
     trainer = VLATrainer(
         model=model,
