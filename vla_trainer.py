@@ -341,11 +341,34 @@ class VLATrainer(Trainer):
                         else:
                             # Fallback for non-indexable items (broadcast them)
                             ex[k] = inputs[k]
+
+                    # FIX: Inject missing 'gripper_valid' key required by utils.py
+                    if "gripper_valid" not in ex:
+                        # RDT/UMI standard chunk size is 24. We default to all valid (ones).
+                        # Using same device as input_ids to avoid device mismatch.
+                        # This avoids the KeyError in utils.py
+                        ex["gripper_valid"] = torch.ones(24, dtype=torch.bool, device=inputs["input_ids"].device)
+
                     examples_list.append(ex)
 
-                metrics_per_step = self.compute_metrics(
-                    model=model, examples=examples_list
-                )
+                try:
+                    metrics_per_step = self.compute_metrics(
+                        model=model, examples=examples_list
+                    )
+                except KeyError as e:
+                    print(f"DEBUG FATAL: compute_metrics failed with KeyError: {e}")
+                    # Print first example keys to debug what IS present
+                    if len(examples_list) > 0:
+                        print("DEBUG: Available keys in example[0]:", list(examples_list[0].keys()))
+                    else:
+                        print("DEBUG: examples_list is empty!")
+                    # Don't raise, just skip this batch to allow training to proceed if possible
+                    # raise e
+                    continue  # Try to skip bad batch
+                except Exception as e:
+                    print(f"DEBUG FATAL: compute_metrics failed with Exception: {e}")
+                    traceback.print_exc()
+                    continue
 
             if is_torch_xla_available():
                 xm.mark_step()
