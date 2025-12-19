@@ -324,13 +324,24 @@ class VLATrainer(Trainer):
                     traceback.print_exc()
 
             with torch.no_grad():
-                # FIX: Unbatch inputs into a list of examples for compute_metrics
-                # utils.py expects a list of dicts, but inputs is a dict of batched tensors
+                # CRITICAL FIX: Unbatch inputs into a list of examples
+                # utils.py's compute_action_metrics expects a LIST of dictionaries,
+                # but 'inputs' is a DICTIONARY of batched tensors.
+                # We must "unbatch" the dictionary into a list of single-sample dictionaries.
+
                 batch_sz = inputs["input_ids"].shape[0]
-                examples_list = [
-                    {k: v[i] for k, v in inputs.items()}
-                    for i in range(batch_sz)
-                ]
+                examples_list = []
+                keys = list(inputs.keys())
+                for i in range(batch_sz):
+                    ex = {}
+                    for k in keys:
+                        # Check if the item is indexable (tensor or list)
+                        if isinstance(inputs[k], (torch.Tensor, list, tuple, np.ndarray)):
+                            ex[k] = inputs[k][i]
+                        else:
+                            # Fallback for non-indexable items (broadcast them)
+                            ex[k] = inputs[k]
+                    examples_list.append(ex)
 
                 metrics_per_step = self.compute_metrics(
                     model=model, examples=examples_list
